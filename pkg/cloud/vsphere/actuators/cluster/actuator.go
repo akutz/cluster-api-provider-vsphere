@@ -186,10 +186,10 @@ func (a *Actuator) reconcileReadyState(ctx *context.ClusterContext) error {
 	ctx.Logger.V(6).Info("calculated API endpoint for target cluster", "api-endpoint-host", apiEndpoint.Host, "api-endpoint-port", apiEndpoint.Port)
 
 	// Update the kubeadm control plane endpoint with the one from the kubeconfig.
-	if ctx.ClusterConfig.ClusterConfiguration.ControlPlaneEndpoint != controlPlaneEndpointURL.Host {
-		ctx.ClusterConfig.ClusterConfiguration.ControlPlaneEndpoint = controlPlaneEndpointURL.Host
-		ctx.Logger.V(6).Info("stored control plane endpoint in kubeadm cluster config", "control-plane-endpoint", controlPlaneEndpointURL.Host)
-	}
+	//if ctx.ClusterConfig.ClusterConfiguration.ControlPlaneEndpoint != controlPlaneEndpointURL.Host {
+	//	ctx.ClusterConfig.ClusterConfiguration.ControlPlaneEndpoint = controlPlaneEndpointURL.Host
+	//	ctx.Logger.V(6).Info("stored control plane endpoint in kubeadm cluster config", "control-plane-endpoint", controlPlaneEndpointURL.Host)
+	//}
 
 	// Update the ready status.
 	ctx.ClusterStatus.Ready = true
