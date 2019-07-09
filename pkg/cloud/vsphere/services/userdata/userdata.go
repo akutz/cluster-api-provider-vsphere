@@ -18,6 +18,7 @@ package userdata
 
 import (
 	"bytes"
+	"strings"
 	"text/template"
 
 	"github.com/pkg/errors"
@@ -89,4 +90,24 @@ func funcMap(funcs map[string]interface{}) template.FuncMap {
 	}
 
 	return funcMap
+}
+
+func defaultFuncMap() template.FuncMap {
+	return template.FuncMap{
+		"Base64Encode":   templateBase64Encode,
+		"Indent":         templateYAMLIndent,
+		"HostNameLookup": func() string { return "{{ ds.meta_data.hostname }}" },
+		"ToHostName":     func(s string) string { return strings.Split(s, ".")[0] },
+		"ToDomainFQDN": func(s string) string {
+			parts := strings.SplitN(s, ".", 2)
+			switch lp := len(parts); {
+			case lp == 0:
+				return ""
+			case lp == 1:
+				return parts[0]
+			default:
+				return parts[1]
+			}
+		},
+	}
 }

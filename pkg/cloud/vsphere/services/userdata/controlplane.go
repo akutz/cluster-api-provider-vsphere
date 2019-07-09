@@ -51,6 +51,21 @@ public-network = "{{ .Network }}"
 - "{{.}}"{{end}}{{end}}
 
 write_files:
+- path: /etc/hostname
+  owner: root:root
+  permissions: 0644
+  content: |
+    {{ HostNameLookup }}
+- path: /etc/hosts
+  owner: root:root
+  permissions: 0644
+  content: |
+    ::1         ipv6-localhost ipv6-loopback
+    127.0.0.1   localhost
+    127.0.0.1   localhost.{{ ToDomainFQDN HostNameLookup }}
+    127.0.0.1   {{ ToHostName HostNameLookup }}
+    127.0.0.1   {{ HostNameLookup }}
+
 -   path: /etc/kubernetes/pki/ca.crt
     encoding: "base64"
     owner: root:root
@@ -133,6 +148,21 @@ kubeadm:
 - "{{.}}"{{end}}{{end}}
 
 write_files:
+- path: /etc/hostname
+  owner: root:root
+  permissions: 0644
+  content: |
+    {{ HostNameLookup() }}
+- path: /etc/hosts
+  owner: root:root
+  permissions: 0644
+  content: |
+    ::1         ipv6-localhost ipv6-loopback
+    127.0.0.1   localhost
+    127.0.0.1   localhost.{{ ToDomainFQDN HostNameLookup() }}
+    127.0.0.1   {{ ToHostName HostNameLookup() }}
+    127.0.0.1   {{ HostNameLookup() }}
+
 -   path: /etc/kubernetes/pki/ca.crt
     encoding: "base64"
     owner: root:root
@@ -310,12 +340,7 @@ func NewControlPlane(input *ControlPlaneInput) (string, error) {
 		return "", errors.Wrapf(err, "ControlPlaneInput is invalid")
 	}
 
-	fMap := map[string]interface{}{
-		"Base64Encode": templateBase64Encode,
-		"Indent":       templateYAMLIndent,
-	}
-
-	userData, err := generateWithFuncs("controlplane", controlPlaneCloudInit, funcMap(fMap), input)
+	userData, err := generateWithFuncs("controlplane", controlPlaneCloudInit, defaultFuncMap(), input)
 	if err != nil {
 		return "", errors.Wrapf(err, "failed to generate user data for new control plane machine")
 	}
@@ -331,12 +356,7 @@ func JoinControlPlane(input *ContolPlaneJoinInput) (string, error) {
 		return "", errors.Wrapf(err, "ControlPlaneInput is invalid")
 	}
 
-	fMap := map[string]interface{}{
-		"Base64Encode": templateBase64Encode,
-		"Indent":       templateYAMLIndent,
-	}
-
-	userData, err := generateWithFuncs("controlplane", controlPlaneJoinCloudInit, funcMap(fMap), input)
+	userData, err := generateWithFuncs("controlplane", controlPlaneJoinCloudInit, defaultFuncMap(), input)
 	if err != nil {
 		return "", errors.Wrapf(err, "failed to generate user data for machine joining control plane")
 	}
@@ -345,9 +365,7 @@ func JoinControlPlane(input *ContolPlaneJoinInput) (string, error) {
 
 // NewCloudConfig returns the string content for the vSphere Cloud Provider cloud config file
 func NewCloudConfig(input *CloudConfigInput) (string, error) {
-	fMap := map[string]interface{}{}
-
-	userData, err := generateWithFuncs("cloudprovider", cloudConfig, funcMap(fMap), input)
+	userData, err := generateWithFuncs("cloudprovider", cloudConfig, defaultFuncMap(), input)
 	if err != nil {
 		return "", errors.Wrapf(err, "failed to generate user data for new control plane machine")
 	}
