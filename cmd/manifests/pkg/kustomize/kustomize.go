@@ -25,19 +25,19 @@ import (
 	"text/template"
 
 	"github.com/pkg/errors"
-	"sigs.k8s.io/kustomize/k8sdeps/kunstruct"
-	k8stransformer "sigs.k8s.io/kustomize/k8sdeps/transformer"
-	"sigs.k8s.io/kustomize/k8sdeps/validator"
-	"sigs.k8s.io/kustomize/pkg/fs"
-	"sigs.k8s.io/kustomize/pkg/ifc"
-	"sigs.k8s.io/kustomize/pkg/ifc/transformer"
-	"sigs.k8s.io/kustomize/pkg/loader"
-	"sigs.k8s.io/kustomize/pkg/plugins"
-	"sigs.k8s.io/kustomize/pkg/resmap"
-	"sigs.k8s.io/kustomize/pkg/resource"
-	"sigs.k8s.io/kustomize/pkg/target"
-	"sigs.k8s.io/kustomize/pkg/types"
-	"sigs.k8s.io/kustomize/plugin/builtin"
+
+	"sigs.k8s.io/kustomize/v3/k8sdeps/kunstruct"
+	"sigs.k8s.io/kustomize/v3/k8sdeps/transformer"
+	"sigs.k8s.io/kustomize/v3/k8sdeps/validator"
+	"sigs.k8s.io/kustomize/v3/pkg/fs"
+	"sigs.k8s.io/kustomize/v3/pkg/ifc"
+	"sigs.k8s.io/kustomize/v3/pkg/loader"
+	"sigs.k8s.io/kustomize/v3/pkg/plugins"
+	"sigs.k8s.io/kustomize/v3/pkg/resmap"
+	"sigs.k8s.io/kustomize/v3/pkg/resource"
+	"sigs.k8s.io/kustomize/v3/pkg/target"
+	"sigs.k8s.io/kustomize/v3/pkg/types"
+	"sigs.k8s.io/kustomize/v3/plugin/builtin"
 )
 
 // ReorderOutputType is the type of output ordering used by Kustomize.
@@ -65,7 +65,7 @@ type BuildOptions struct {
 	LoadRestrictorFunc      loader.LoadRestrictorFunc
 	FileSystem              fs.FileSystem
 	UnstructuredFactory     ifc.KunstructuredFactory
-	PatchTransformerFactory transformer.Factory
+	PatchTransformerFactory resmap.PatchFactory
 	ResourceFactory         *resmap.Factory
 	Validator               ifc.Validator
 	PluginConfig            *types.PluginConfig
@@ -159,10 +159,10 @@ func (o *BuildOptions) reconcileMissingOptions() {
 		o.UnstructuredFactory = kunstruct.NewKunstructuredFactoryImpl()
 	}
 	if o.PatchTransformerFactory == nil {
-		o.PatchTransformerFactory = k8stransformer.NewFactoryImpl()
+		o.PatchTransformerFactory = transformer.NewFactoryImpl()
 	}
 	if o.ResourceFactory == nil {
-		o.ResourceFactory = resmap.NewFactory(resource.NewFactory(o.UnstructuredFactory))
+		o.ResourceFactory = resmap.NewFactory(resource.NewFactory(o.UnstructuredFactory), o.PatchTransformerFactory)
 	}
 	if o.Validator == nil {
 		o.Validator = validator.NewKustValidator()
