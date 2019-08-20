@@ -90,7 +90,7 @@ func (r *VSphereClusterReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, r
 		Logger:         logger,
 	})
 	if err != nil {
-		return reconcile.Result{}, errors.Errorf("failed to create context: %+v", err)
+		return reconcile.Result{}, errors.Wrap(err, "failed to create cluster context")
 	}
 
 	// Always close the context when exiting this function so we can persist any VSphereCluster changes.

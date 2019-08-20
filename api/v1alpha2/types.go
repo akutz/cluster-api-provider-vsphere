@@ -172,3 +172,31 @@ type NetworkStatus struct {
 	// +optional
 	NetworkName string `json:"networkName,omitempty"`
 }
+
+// VirtualMachineState describes the state of a VM.
+type VirtualMachineState string
+
+const (
+	// VirtualMachineStatePending is the string representing a VM with an in-flight task.
+	VirtualMachineStatePending VirtualMachineState = "pending"
+
+	// VirtualMachineStateRunning is the string representing a powered-on VM.
+	VirtualMachineStateRunning = "running"
+
+	// VirtualMachineStateStopped is the string representing a powered-off VM.
+	VirtualMachineStateStopped = "stopped"
+
+	// VirtualMachineStateSuspended is the string representing a suspended VM.
+	VirtualMachineStateSuspended = "suspended"
+)
+
+// VirtualMachine represents data about a vSphere virtual machine object.
+type VirtualMachine struct {
+	Name         string              `json:"name"`
+	InstanceUUID string              `json:"instanceUUID"`
+	ProviderID   string              `json:"providerID"`
+	State        VirtualMachineState `json:"state"`
+	Metadata     string              `json:"metadata"`
+	Network      []NetworkStatus     `json:"network"`
+	TaskID       string              `json:"taskID"`
+}

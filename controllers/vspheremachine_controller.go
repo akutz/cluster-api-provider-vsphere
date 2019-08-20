@@ -35,7 +35,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	infrav1 "sigs.k8s.io/cluster-api-provider-vsphere/api/v1alpha2"
+	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/cloud/vsphere/config"
 	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/cloud/vsphere/context"
+	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/cloud/vsphere/services"
 )
 
 const waitForClusterInfrastructureReadyDuration = 15 * time.Second //nolint
@@ -114,7 +116,7 @@ func (r *VSphereMachineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, r
 		Logger:         logger,
 	})
 	if err != nil {
-		return reconcile.Result{}, errors.Errorf("failed to create context: %+v", err)
+		return reconcile.Result{}, errors.Wrap(err, "failed to create cluster context")
 	}
 
 	// Create the machine context
@@ -123,7 +125,7 @@ func (r *VSphereMachineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, r
 		machine,
 		vsphereMachine)
 	if err != nil {
-		return reconcile.Result{}, errors.Errorf("failed to create machine context: %+v", err)
+		return reconcile.Result{}, errors.Wrap(err, "failed to create machine context")
 	}
 
 	// Always close the context when exiting this function so we can persist any VSphereMachine changes.
@@ -187,6 +189,20 @@ func (r *VSphereMachineReconciler) reconcileNormal(ctx *context.MachineContext) 
 	if ctx.Machine.Spec.Bootstrap.Data == nil {
 		ctx.Logger.Info("Waiting for bootstrap data to be available")
 		return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	var vmService services.VirtualMachineService
+
+	// Get or create the VM.
+	vm, err := vmService.GetOrCreateVM(ctx)
+	if err != nil {
+		// TODO handle error
+		return reconcile.Result{}, err
+	}
+
+	// Requeue VMs if they are in a pending state.
+	if vm.State == infrav1.VirtualMachineStatePending {
+		return reconcile.Result{RequeueAfter: config.DefaultRequeue}, nil
 	}
 
 	return reconcile.Result{}, nil
