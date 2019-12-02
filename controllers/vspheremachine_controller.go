@@ -19,11 +19,11 @@ package controllers
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha2"
 	clusterutilv1 "sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/patch"
@@ -35,17 +35,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	infrav1 "sigs.k8s.io/cluster-api-provider-vsphere/api/v1alpha2"
-	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/config"
 	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/context"
 	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/record"
 	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/services"
 	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/services/govmomi"
 	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/session"
 	infrautilv1 "sigs.k8s.io/cluster-api-provider-vsphere/pkg/util"
-)
-
-const (
-	machineControllerName = "vspheremachine-controller"
 )
 
 // +kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=vspheremachines,verbs=get;list;watch;create;update;patch;delete
@@ -58,7 +53,11 @@ const (
 func AddMachineControllerToManager(ctx *context.ControllerManagerContext, mgr manager.Manager) error {
 
 	var (
-		controllerNameShort = machineControllerName
+		controlledType     = &infrav1.VSphereMachine{}
+		controlledTypeName = reflect.TypeOf(controlledType).Elem().Name()
+		controlledTypeGVK  = infrav1.GroupVersion.WithKind(controlledTypeName)
+
+		controllerNameShort = fmt.Sprintf("%s-controller", strings.ToLower(controlledTypeName))
 		controllerNameLong  = fmt.Sprintf("%s/%s/%s", ctx.Namespace, ctx.Name, controllerNameShort)
 	)
 
@@ -70,20 +69,25 @@ func AddMachineControllerToManager(ctx *context.ControllerManagerContext, mgr ma
 		Logger:                   ctx.Logger.WithName(controllerNameShort),
 	}
 
-	controlledType := &infrav1.VSphereMachine{}
-	controlledTypeName := reflect.TypeOf(controlledType).Elem().Name()
-
 	return ctrl.NewControllerManagedBy(mgr).
+		// Watch the controlled, infrastructure resource.
 		For(controlledType).
+		// Watch the CAPI resource that owns this infrastructure resource.
 		Watches(
 			&source.Kind{Type: &clusterv1.Machine{}},
 			&handler.EnqueueRequestsFromMapFunc{
-				ToRequests: clusterutilv1.MachineToInfrastructureMapFunc(schema.GroupVersionKind{
-					Group:   infrav1.SchemeBuilder.GroupVersion.Group,
-					Version: infrav1.SchemeBuilder.GroupVersion.Version,
-					Kind:    controlledTypeName,
-				}),
-			}).
+				ToRequests: clusterutilv1.MachineToInfrastructureMapFunc(controlledTypeGVK),
+			},
+		).
+		// Watch a GenericEvent channel for the controlled resource.
+		//
+		// This is useful when there are events outside of Kubernetes that
+		// should cause a resource to be synchronized, such as a goroutine
+		// waiting on some asynchronous, external task to complete.
+		Watches(
+			&source.Channel{Source: ctx.GetGenericEventChannelFor(controlledTypeGVK)},
+			&handler.EnqueueRequestForObject{},
+		).
 		Complete(machineReconciler{ControllerContext: controllerContext})
 }
 
@@ -98,7 +102,7 @@ func (r machineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr er
 	vsphereMachine := &infrav1.VSphereMachine{}
 	if err := r.Client.Get(r, req.NamespacedName, vsphereMachine); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.Logger.V(4).Info("VSphereMachine not found, won't reconcile", "key", req.NamespacedName)
+			r.Logger.Info("VSphereMachine not found, won't reconcile", "key", req.NamespacedName)
 			return reconcile.Result{}, nil
 		}
 		return reconcile.Result{}, err
@@ -129,7 +133,7 @@ func (r machineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr er
 	}
 	if err := r.Client.Get(r, vsphereClusterName, vsphereCluster); err != nil {
 		r.Logger.Info("Waiting for VSphereCluster")
-		return reconcile.Result{RequeueAfter: config.DefaultRequeue}, nil
+		return reconcile.Result{}, nil
 	}
 
 	// Get or create an authenticated session to the vSphere endpoint.
@@ -151,18 +155,13 @@ func (r machineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr er
 			vsphereMachine.Name)
 	}
 
-	// Create the cluster context for this request.
-	clusterContext := &context.ClusterContext{
-		ControllerContext: r.ControllerContext,
-		Cluster:           cluster,
-		VSphereCluster:    vsphereCluster,
-		Logger:            r.Logger.WithName(req.Namespace).WithName(req.Name),
-		PatchHelper:       patchHelper,
-	}
-
 	// Create the machine context for this request.
 	machineContext := &context.MachineContext{
-		ClusterContext: clusterContext,
+		ClusterContext: &context.ClusterContext{
+			ControllerContext: r.ControllerContext,
+			Cluster:           cluster,
+			VSphereCluster:    vsphereCluster,
+		},
 		Machine:        machine,
 		VSphereMachine: vsphereMachine,
 		Session:        authSession,
@@ -204,8 +203,8 @@ func (r machineReconciler) reconcileDelete(ctx *context.MachineContext) (reconci
 
 	// Requeue the operation until the VM is "notfound".
 	if vm.State != infrav1.VirtualMachineStateNotFound {
-		ctx.Logger.V(6).Info("requeuing operation until vm state is reconciled", "expected-vm-state", infrav1.VirtualMachineStateNotFound, "actual-vm-state", vm.State)
-		return reconcile.Result{RequeueAfter: config.DefaultRequeue}, nil
+		ctx.Logger.Info("vm state is not reconciled", "expected-vm-state", infrav1.VirtualMachineStateNotFound, "actual-vm-state", vm.State)
+		return reconcile.Result{}, nil
 	}
 
 	// The VM is deleted so remove the finalizer.
@@ -227,14 +226,14 @@ func (r machineReconciler) reconcileNormal(ctx *context.MachineContext) (reconci
 	}
 
 	if !ctx.Cluster.Status.InfrastructureReady {
-		ctx.Logger.Info("Cluster infrastructure is not ready yet, requeuing machine")
-		return reconcile.Result{RequeueAfter: config.DefaultRequeue}, nil
+		ctx.Logger.Info("Cluster infrastructure is not ready yet")
+		return reconcile.Result{}, nil
 	}
 
 	// Make sure bootstrap data is available and populated.
 	if ctx.Machine.Spec.Bootstrap.Data == nil {
 		ctx.Logger.Info("Waiting for bootstrap data to be available")
-		return reconcile.Result{RequeueAfter: config.DefaultRequeue}, nil
+		return reconcile.Result{}, nil
 	}
 
 	// TODO(akutz) Implement selection of VM service based on vSphere version
@@ -247,16 +246,16 @@ func (r machineReconciler) reconcileNormal(ctx *context.MachineContext) (reconci
 	}
 
 	if vm.State != infrav1.VirtualMachineStateReady {
-		ctx.Logger.V(6).Info("requeuing operation until vm state is reconciled", "expected-vm-state", infrav1.VirtualMachineStateReady, "actual-vm-state", vm.State)
-		return reconcile.Result{RequeueAfter: config.DefaultRequeue}, nil
+		ctx.Logger.Info("vm state is not reconciled", "expected-vm-state", infrav1.VirtualMachineStateReady, "actual-vm-state", vm.State)
+		return reconcile.Result{}, nil
 	}
 
 	if ok, err := r.reconcileNetwork(ctx, vm, vmService); !ok {
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		ctx.Logger.V(6).Info("requeuing operation until vm network is reconciled")
-		return reconcile.Result{RequeueAfter: config.DefaultRequeue}, nil
+		ctx.Logger.Info("waiting on vm networking")
+		return reconcile.Result{}, nil
 	}
 
 	if err := r.reconcileProviderID(ctx, vm, vmService); err != nil {
@@ -265,7 +264,7 @@ func (r machineReconciler) reconcileNormal(ctx *context.MachineContext) (reconci
 
 	// Once the provider ID is set then the VSphereMachine is InfrastructureReady
 	ctx.VSphereMachine.Status.Ready = true
-	ctx.Logger.V(6).Info("VSphereMachine is infrastructure-ready")
+	ctx.Logger.Info("VSphereMachine is infrastructure-ready")
 
 	return reconcile.Result{}, nil
 }
@@ -291,7 +290,7 @@ func (r machineReconciler) reconcileNetwork(ctx *context.MachineContext, vm infr
 	}
 
 	if len(ipAddrs) == 0 {
-		ctx.Logger.V(6).Info("requeuing to wait on IP addresses")
+		ctx.Logger.Info("waiting on IP addresses")
 		return false, nil
 	}
 
@@ -308,7 +307,7 @@ func (r machineReconciler) reconcileProviderID(ctx *context.MachineContext, vm i
 	}
 	if ctx.VSphereMachine.Spec.ProviderID == nil || *ctx.VSphereMachine.Spec.ProviderID != providerID {
 		ctx.VSphereMachine.Spec.ProviderID = &providerID
-		ctx.Logger.V(6).Info("updated provider ID", "provider-id", providerID)
+		ctx.Logger.Info("updated provider ID", "provider-id", providerID)
 	}
 	return nil
 }
