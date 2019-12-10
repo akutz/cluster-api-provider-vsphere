@@ -21,8 +21,6 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"sigs.k8s.io/cluster-api-provider-vsphere/pkg/context"
@@ -37,7 +35,7 @@ func sanitizeIPAddrs(ctx *context.MachineContext, ipAddrs []string) []string {
 	newIPAddrs := []string{}
 	for _, addr := range ipAddrs {
 		if err := net.ErrOnLocalOnlyIPAddr(addr); err != nil {
-			ctx.Logger.V(8).Info("ignoring IP address", "reason", err.Error())
+			ctx.Logger.V(4).Info("ignoring IP address", "reason", err.Error())
 		} else {
 			newIPAddrs = append(newIPAddrs, addr)
 		}
@@ -114,11 +112,11 @@ func reconcileInFlightTask(ctx *context.MachineContext) (bool, error) {
 		logger.V(4).Info("task is still running", "description-id", task.Info.DescriptionId)
 		return true, nil
 	case types.TaskInfoStateSuccess:
-		logger.V(4).Info("task is a success", "description-id", task.Info.DescriptionId)
+		logger.Info("task is a success", "description-id", task.Info.DescriptionId)
 		ctx.VSphereMachine.Status.TaskRef = ""
 		return false, nil
 	case types.TaskInfoStateError:
-		logger.V(2).Info("task failed", "description-id", task.Info.DescriptionId)
+		logger.Info("task failed", "description-id", task.Info.DescriptionId)
 		ctx.VSphereMachine.Status.TaskRef = ""
 		return false, nil
 	default:
@@ -126,41 +124,25 @@ func reconcileInFlightTask(ctx *context.MachineContext) (bool, error) {
 	}
 }
 
-func reconcileVSphereMachineOnTaskCompletion(ctx *context.MachineContext) error {
-	task := getTask(ctx)
-	if task == nil {
-		ctx.Logger.V(4).Info(
-			"skipping reconcile VSphereMachine on task completion",
-			"reason", "no-task")
-		return nil
-	}
-	ctx.Logger.Info("enqueuing reconcile request on task completion",
-		"task-ref", task.Reference().Value,
-		"task-name", task.Info.Name,
-		"task-entity-name", task.Info.EntityName,
-		"task-description-id", task.Info.DescriptionId)
-	if err := reconcileObjectOnTaskCompletion(ctx, ctx.VSphereMachine, task.Reference()); err != nil {
-		ctx.Logger.Error(
-			err, "failed to enqueue reconcile request when task is complete for vm %s", ctx)
-	}
-	return nil
-}
-
 func reconcileVSphereMachineWhenNetworkIsReady(
 	ctx *virtualMachineContext,
-	powerOnTask *object.Task) error {
+	powerOnTask *object.Task) {
 
-	return reconcileObjectOnFuncCompletion(
-		&ctx.MachineContext, ctx.VSphereMachine,
+	reconcileVSphereMachineOnFuncCompletion(
+		&ctx.MachineContext,
 		func() ([]interface{}, error) {
 			taskInfo, err := powerOnTask.WaitForResult(ctx)
-			if err != nil {
+			if err != nil && taskInfo == nil {
 				return nil, errors.Wrapf(err, "failed to wait for power on op for vm %s", ctx)
 			}
-			if taskInfo.State != types.TaskInfoStateSuccess {
+			powerState, err := ctx.Obj.PowerState(ctx)
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed to get power state for vm %s", ctx)
+			}
+			if powerState != types.VirtualMachinePowerStatePoweredOn {
 				return nil, errors.Errorf(
-					"unexpected task state %v for power on op for vm %s",
-					taskInfo.State, ctx)
+					"unexpected power state %v for vm %s",
+					powerState, ctx)
 			}
 			if _, err := ctx.Obj.WaitForNetIP(ctx, false); err != nil {
 				return nil, errors.Wrapf(err, "failed to wait for networking for vm %s", ctx)
@@ -171,20 +153,36 @@ func reconcileVSphereMachineWhenNetworkIsReady(
 		})
 }
 
-func reconcileObjectOnTaskCompletion(
-	ctx *context.MachineContext,
-	obj runtime.Object,
-	taskRef types.ManagedObjectReference) error {
+func reconcileVSphereMachineOnTaskCompletion(ctx *context.MachineContext) {
+	task := getTask(ctx)
+	if task == nil {
+		ctx.Logger.V(4).Info(
+			"skipping reconcile VSphereMachine on task completion",
+			"reason", "no-task")
+		return
+	}
+	taskRef := task.Reference()
+	taskHelper := object.NewTask(ctx.Session.Client.Client, taskRef)
 
-	return reconcileObjectOnFuncCompletion(ctx, obj, func() ([]interface{}, error) {
-		taskHelper := object.NewTask(ctx.Session.Client.Client, taskRef)
+	ctx.Logger.Info(
+		"enqueuing reconcile request on task completion",
+		"task-ref", taskRef,
+		"task-name", task.Info.Name,
+		"task-entity-name", task.Info.EntityName,
+		"task-description-id", task.Info.DescriptionId)
+
+	reconcileVSphereMachineOnFuncCompletion(ctx, func() ([]interface{}, error) {
 		taskInfo, err := taskHelper.WaitForResult(ctx)
-		if err != nil {
+
+		// An error is only returned if the process of waiting for the result
+		// failed, *not* if the task itself failed.
+		if err != nil && taskInfo == nil {
 			return nil, err
 		}
+
 		return []interface{}{
 			"reason", "task",
-			"task-ref", taskRef.Value,
+			"task-ref", taskRef,
 			"task-name", taskInfo.Name,
 			"task-entity-name", taskInfo.EntityName,
 			"task-state", taskInfo.State,
@@ -193,17 +191,12 @@ func reconcileObjectOnTaskCompletion(
 	})
 }
 
-func reconcileObjectOnFuncCompletion(
+func reconcileVSphereMachineOnFuncCompletion(
 	ctx *context.MachineContext,
-	obj runtime.Object,
-	waitFn func() (loggerKeysAndValues []interface{}, _ error)) error {
+	waitFn func() (loggerKeysAndValues []interface{}, _ error)) {
 
-	obj = obj.DeepCopyObject()
-	objWithMeta, ok := obj.(metav1.ObjectMetaAccessor)
-	if !ok {
-		return errors.Errorf(
-			"unable to assert object %T as metav1.ObjectMetaAccessor", obj)
-	}
+	obj := ctx.VSphereMachine.DeepCopy()
+	gvk := obj.GetObjectKind().GroupVersionKind()
 
 	// Wait on the function to complete in a background goroutine.
 	go func() {
@@ -217,12 +210,10 @@ func reconcileObjectOnFuncCompletion(
 		// a reconcile event for the associated resource by sending a
 		// GenericEvent into the event channel for the resource type.
 		ctx.Logger.Info("triggering GenericEvent", loggerKeysAndValues...)
-		eventChannel := ctx.GetGenericEventChannelFor(obj.GetObjectKind().GroupVersionKind())
+		eventChannel := ctx.GetGenericEventChannelFor(gvk)
 		eventChannel <- event.GenericEvent{
-			Meta:   objWithMeta.GetObjectMeta(),
+			Meta:   obj,
 			Object: obj,
 		}
 	}()
-
-	return nil
 }

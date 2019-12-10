@@ -229,10 +229,7 @@ func (vms *VMService) reconcilePowerState(ctx *virtualMachineContext) (bool, err
 
 		// Once the VM is successfully powered on, a reconcile request should be
 		// triggered once the VM reports IP addresses are available.
-		if err := reconcileVSphereMachineWhenNetworkIsReady(ctx, task); err != nil {
-			return false, errors.Wrapf(
-				err, "failed to enqueue a reconcile request for when network is ready for vm %s", ctx)
-		}
+		reconcileVSphereMachineWhenNetworkIsReady(ctx, task)
 
 		ctx.Logger.Info("wait for VM to be powered on")
 		return false, nil
@@ -330,7 +327,7 @@ func (vms *VMService) getNetworkStatus(ctx *virtualMachineContext) ([]infrav1.Ne
 	if err != nil {
 		return nil, err
 	}
-	ctx.Logger.V(6).Info("got allNetStatus", "status", allNetStatus)
+	ctx.Logger.V(4).Info("got allNetStatus", "status", allNetStatus)
 	apiNetStatus := []infrav1.NetworkStatus{}
 	for _, s := range allNetStatus {
 		apiNetStatus = append(apiNetStatus, infrav1.NetworkStatus{

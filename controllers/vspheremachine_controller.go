@@ -17,10 +17,16 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"os"
 	"reflect"
 	"strings"
+	"time"
 
+	"github.com/davecgh/go-spew/spew"
+	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -107,6 +113,7 @@ func (r machineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr er
 		}
 		return reconcile.Result{}, err
 	}
+	sdump("LOCAL VSPHEREMACHINE SPEW - ONENTRY", vsphereMachine)
 
 	// Fetch the CAPI Machine.
 	machine, err := clusterutilv1.GetOwnerMachine(r, r.Client, vsphereMachine.ObjectMeta)
@@ -169,16 +176,97 @@ func (r machineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reterr er
 		PatchHelper:    patchHelper,
 	}
 
+	// Print the task-ref upon entry and upon exit.
+	machineContext.Logger.V(4).Info(
+		"VSphereMachine.Status.TaskRef OnEntry",
+		"task-ref", machineContext.VSphereMachine.Status.TaskRef)
+	defer func() {
+		machineContext.Logger.V(4).Info(
+			"VSphereMachine.Status.TaskRef OnExit",
+			"task-ref", machineContext.VSphereMachine.Status.TaskRef)
+		sdump("LOCAL VSPHEREMACHINE SPEW - ONEXIT", machineContext.VSphereMachine)
+	}()
+
 	// Always issue a patch when exiting this function so changes to the
 	// resource are patched back to the API server.
 	defer func() {
+		// Patch the VSphereMachine resource.
 		if err := machineContext.Patch(); err != nil {
 			if reterr == nil {
 				reterr = err
-			} else {
-				machineContext.Logger.Error(err, "patch failed", "machine", machineContext.String())
 			}
+			machineContext.Logger.Error(err, "patch failed", "machine", machineContext.String())
 		}
+
+		// localObj references the VSphereMachine resource fetched at the
+		// beginning of this reconcile request.
+		localObj := machineContext.VSphereMachine.DeepCopy()
+		sdump("LOCAL DEEPCOPIED VSPHEREMACHINE SPEW - ONEXIT", localObj)
+
+		// remoteObj refererences the same VSphereMachine resource as it exists
+		// on the API server post the patch operation above. In a perfect world,
+		// the Status for localObj and remoteObj should be the same.
+		var remoteObj *infrav1.VSphereMachine
+
+		// Fetch the up-to-date VSphereMachine resource into remoteObj until the
+		// fetched resource has a a different ResourceVersion than the local
+		// object.
+		//
+		// FYI - resource versions are opaque, numeric strings and should not
+		// be compared with < or >, only for equality -
+		// https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions.
+		//
+		// Since CAPV is currently deployed with a single replica, and this
+		// controller has a max concurrency of one, the only agent updating the
+		// VSphereMachine resource should be this controller.
+		//
+		// So if the remote resource's ResourceVersion is different than the
+		// ResourceVersion of the resource fetched at the beginning of this
+		// reconcile request, then that means the remote resource should be
+		// newer than the local resource.
+		//
+		// TODO(akutz) The additional logging will likely be removed at some
+		//             future point. For now the logging will be present, but
+		//             enabled only when the VSphereMachine has a specific
+		//             annotation set.
+		for {
+			remoteObj = &infrav1.VSphereMachine{}
+			if err := r.Client.Get(r, req.NamespacedName, remoteObj); err != nil {
+				if apierrors.IsNotFound(err) {
+					// It's possible that the remote resource cannot be found
+					// because it has been removed. Do not error, just exit.
+					return
+				}
+
+				// There was an issue getting the remote resource. Sleep for a
+				// second and try again.
+				machineContext.Logger.Error(err, "failed to get VSphereMachine while exiting reconcile")
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			// If the remote resource version is not the same as the local
+			// resource version, then it means we were able to get a resource
+			// newer than the one we already had.
+			if localObj.ResourceVersion != remoteObj.ResourceVersion {
+				machineContext.Logger.Info(
+					"resource is patched",
+					"local-resource-version", localObj.ResourceVersion,
+					"remote-resource-version", remoteObj.ResourceVersion)
+				break
+			}
+
+			// The remote resource version is the same as the local resource
+			// version, which means the local cache is not yet up-to-date.
+			machineContext.Logger.Info(
+				"resource is not patched",
+				"local-resource-version", localObj.ResourceVersion,
+				"remote-resource-version", remoteObj.ResourceVersion)
+			sdiff(localObj, remoteObj)
+			sdump("REMOTE VSPHEREMACHINE SPEW - DRIFT", remoteObj)
+			time.Sleep(time.Second * 1)
+		}
+		sdump("REMOTE VSPHEREMACHINE SPEW - ONEXIT", remoteObj)
 	}()
 
 	// Handle deleted machines
@@ -310,4 +398,46 @@ func (r machineReconciler) reconcileProviderID(ctx *context.MachineContext, vm i
 		ctx.Logger.Info("updated provider ID", "provider-id", providerID)
 	}
 	return nil
+}
+
+const indentation = "    "
+
+func indent(s string) string {
+	splitLines := strings.Split(s, "\n")
+	indentedLines := make([]string, 0, len(splitLines))
+	for _, line := range splitLines {
+		indented := indentation + line
+		indentedLines = append(indentedLines, indented)
+	}
+	return strings.Join(indentedLines, "\n")
+}
+
+func sdiff(a, b *infrav1.VSphereMachine) {
+	if !hasDebugAnnotation(a) {
+		return
+	}
+	if statusDiff := cmp.Diff(a.Status, b.Status); statusDiff != "" {
+		buf := &bytes.Buffer{}
+		fmt.Fprintf(buf, "\n\n")
+		fmt.Fprintf(buf, "VSPHEREMACHINE STATUS SYNC ISSUE\n\n")
+		fmt.Fprintf(buf, "STATUS DIFF\n\n%s\n\n", indent(statusDiff))
+		resourceDiff := cmp.Diff(a, b)
+		fmt.Fprintf(buf, "RESOURCE DIFF \n\n%s\n\n", indent(resourceDiff))
+		io.Copy(os.Stdout, buf)
+	}
+}
+
+func sdump(message string, obj *infrav1.VSphereMachine) {
+	if !hasDebugAnnotation(obj) {
+		return
+	}
+	buf := &bytes.Buffer{}
+	fmt.Fprintf(buf, "\n\n")
+	fmt.Fprintf(buf, "%s\n\n", message)
+	fmt.Fprintf(buf, "%s\n\n", indent(spew.Sdump(obj)))
+	io.Copy(os.Stdout, buf)
+}
+
+func hasDebugAnnotation(obj *infrav1.VSphereMachine) bool {
+	return obj.Annotations["vsphere.infrastructure.cluster.x-k8s.io/debug"] != ""
 }
